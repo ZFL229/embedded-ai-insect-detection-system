@@ -59,7 +59,7 @@ assembler = ImageChunkAssembler(timeout_sec=ASSEMBLY_TIMEOUT_SEC)
 
 # ===== 是否保存重组图像（调试用）=====
 SAVE_REASSEMBLED_IMAGE = True
-SAVE_DIR = Path(r"C:\Users\linzh\Desktop\Final_Project\Phase_4\reassembled_output")
+SAVE_DIR = Path(r"C:\Users\linzh\Desktop\Final_Project\Communication_module\reassembled_output")
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
 
 def auto_detect_serial_port():
@@ -139,15 +139,55 @@ def handle_image_frame(frame):
 
             print(f"[PC] saved: {out_path}")
 
+def wait_for_mcu_standby_and_send_ready(ser):
+    """
+    PC端握手：
+        1. 等待 MCU 周期性发送 STANDBY
+        2. 收到 STANDBY 后回复 READY
+        3. 清空输入缓冲区，避免握手文本残留影响后续帧解析
+    """
+
+    print("[PC] Waiting for MCU STANDBY...")
+
+    buf = b""
+
+    while True:
+        data = ser.read(128)
+
+        if data:
+            buf += data
+            print(f"[PC] HANDSHAKE RX: {data!r}")
+
+            if b"STANDBY" in buf:
+                ser.write(b"READY")
+                ser.flush()
+
+                print("[PC] STANDBY received")
+                print("[PC] READY sent")
+                break
+
+        if len(buf) > 1024:
+            buf = buf[-128:]
+
+        time.sleep(0.05)
+
+    try:
+        ser.reset_input_buffer()
+    except Exception:
+        pass
+
 def main():
     """
     UART Image Receiver
 
     职责：
-        1. 从 UART 接收字节流
-        2. 使用 try_parse_frame() 解析底层帧
-        3. 使用 ImageChunkAssembler 重组 JPEG
-        4. 将完整图片保存到本地
+        1. 打开 UART 串口
+        2. 等待 MCU 发送 STANDBY
+        3. 回复 READY 完成握手
+        4. 从 UART 接收字节流
+        5. 使用 try_parse_frame() 解析底层帧
+        6. 使用 ImageChunkAssembler 重组 JPEG
+        7. 将完整图片保存到本地
     """
 
     # ===== 串口初始化 =====
@@ -169,11 +209,14 @@ def main():
     print(f"[PC] Opened {port_to_use} @ {BAUD}")
     print(f"[PC] Save dir: {SAVE_DIR}")
 
+    # ===== 新增：握手机制 =====
+    wait_for_mcu_standby_and_send_ready(ser)
+
+    # ===== 握手完成后，进入正式帧接收 =====
     buf = b""
 
     try:
         while True:
-
             chunk = ser.read(4096)
 
             if chunk:

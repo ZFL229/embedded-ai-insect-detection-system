@@ -134,10 +134,19 @@ def handle_image_frame(frame):
             ts = time.strftime("%Y%m%d_%H%M%S")
             out_path = SAVE_DIR / f"img_{result.img_id}_{ts}.jpg"
 
-            with open(out_path, "wb") as f:
-                f.write(jpeg_bytes)
+            try:
+                with open(out_path, "wb") as f:
+                    f.write(jpeg_bytes)
+            except OSError as exc:
+                print(f"[PC] save failed: {exc}")
+                return False
 
             print(f"[PC] saved: {out_path}")
+            return True
+
+        print("[PC] image reassembled, save disabled")
+
+    return False
 
 def wait_for_mcu_standby_and_send_ready(ser):
     """
@@ -190,6 +199,8 @@ def main():
         7. 将完整图片保存到本地
     """
 
+    global assembler
+
     # ===== 串口初始化 =====
     port_to_use = PORT if PORT else auto_detect_serial_port()
 
@@ -210,39 +221,49 @@ def main():
     print(f"[PC] Save dir: {SAVE_DIR}")
 
     # ===== 新增：握手机制 =====
-    wait_for_mcu_standby_and_send_ready(ser)
 
     # ===== 握手完成后，进入正式帧接收 =====
-    buf = b""
-
     try:
         while True:
-            chunk = ser.read(4096)
+            wait_for_mcu_standby_and_send_ready(ser)
 
-            if chunk:
-                buf += chunk
-                print(f"[PC] RX bytes={len(chunk)}, buffer={len(buf)}")
+            buf = b""
+            assembler = ImageChunkAssembler(timeout_sec=ASSEMBLY_TIMEOUT_SEC)
+            image_saved = False
 
-            while True:
-                frame, buf, err = try_parse_frame(buf)
+            print("[PC] Start receiving one image...")
 
-                if err:
-                    print("[PC] PARSE_ERR:", err)
+            while not image_saved:
+                chunk = ser.read(4096)
 
-                if not frame:
-                    break
+                if chunk:
+                    buf += chunk
+                    print(f"[PC] RX bytes={len(chunk)}, buffer={len(buf)}")
 
-                if frame.type == TYPE_IMAGE:
-                    handle_image_frame(frame)
-                    continue
+                while True:
+                    frame, buf, err = try_parse_frame(buf)
 
-                print(f"[PC] IGNORE frame.type=0x{frame.type:02X}, seq={frame.seq}")
+                    if err:
+                        print("[PC] PARSE_ERR:", err)
 
-            expired = assembler.cleanup()
-            for img_id in expired:
-                print(f"[PC] timeout drop img_id={img_id}")
+                    if not frame:
+                        break
 
-            time.sleep(0.002)
+                    if frame.type == TYPE_IMAGE:
+                        if handle_image_frame(frame):
+                            image_saved = True
+                            break
+                        continue
+
+                    print(f"[PC] IGNORE frame.type=0x{frame.type:02X}, seq={frame.seq}")
+
+                expired = assembler.cleanup()
+                for img_id in expired:
+                    print(f"[PC] timeout drop img_id={img_id}")
+
+                time.sleep(0.002)
+
+            print("[PC] One image saved, waiting for next STANDBY...")
 
     finally:
         try:

@@ -35,6 +35,7 @@ import serial
 from serial.tools import list_ports
 import time
 import sys
+import re
 from pathlib import Path
 
 # 让脚本无论从哪里启动，都能 import Ai_module
@@ -43,7 +44,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 # ===== Frame codec（阶段三新增）=====
 # 要求你的 frame_codec.py 在 PROJECT_ROOT 下，或在 sys.path 能找到
-from frame_codec import try_parse_frame
+from frame_codec import SOF, try_parse_frame
 from image_chunk_protocol import ImageChunkAssembler
 
 # ===== 串口参数 =====
@@ -56,11 +57,22 @@ TYPE_IMAGE = 0x03
 # ===== 分片重组 =====
 ASSEMBLY_TIMEOUT_SEC = 5.0
 assembler = ImageChunkAssembler(timeout_sec=ASSEMBLY_TIMEOUT_SEC)
+last_pc_account = None
+
+# ===== 传输终止握手 =====
+TRANSFER_DONE_REQ = b"TX_DONE"
+TRANSFER_DONE_ACK = b"DONE_ACK"
+TRANSFER_DONE_TIMEOUT_SEC = 3.0
 
 # ===== 是否保存重组图像（调试用）=====
 SAVE_REASSEMBLED_IMAGE = True
 SAVE_DIR = Path(r"C:\Users\linzh\Desktop\Final_Project\Communication_module\reassembled_output")
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
+
+MCU_ACCOUNT_RE = re.compile(
+    r"\[MCU_ACCOUNT\]\s+img_id=(?P<img_id>\d+)\s+"
+    r"capture_len=(?P<capture_len>\d+)\s+tx_len=(?P<tx_len>\d+)"
+)
 
 def auto_detect_serial_port():
     """
@@ -117,16 +129,21 @@ def handle_image_frame(frame):
             通信 -> AI的触发点
     """
 
+    global last_pc_account
+
     result = assembler.handle_frame(frame)
 
     if result is not None:
         # ===== 重组完成 =====
         jpeg_bytes = result.data
+        pc_received_len = len(jpeg_bytes)
+        saved_file_size = None
+
         print(
             f"[PC] IMAGE COMPLETE: "
             f"img_id={result.img_id}, "
             f"chunks={result.total_chunks}, "
-            f"bytes={len(jpeg_bytes)}"
+            f"bytes={pc_received_len}"
         )
 
         # ===== 保存（调试用）=====
@@ -137,16 +154,105 @@ def handle_image_frame(frame):
             try:
                 with open(out_path, "wb") as f:
                     f.write(jpeg_bytes)
+                saved_file_size = out_path.stat().st_size
             except OSError as exc:
                 print(f"[PC] save failed: {exc}")
                 return False
 
             print(f"[PC] saved: {out_path}")
+            print(
+                f"[PC_ACCOUNT] img_id={result.img_id} "
+                f"pc_received_len={pc_received_len} "
+                f"saved_file_size={saved_file_size}"
+            )
+
+            last_pc_account = {
+                "img_id": result.img_id,
+                "pc_received_len": pc_received_len,
+                "saved_file_size": saved_file_size,
+            }
             return True
 
         print("[PC] image reassembled, save disabled")
+        print(
+            f"[PC_ACCOUNT] img_id={result.img_id} "
+            f"pc_received_len={pc_received_len} "
+            f"saved_file_size=DISABLED"
+        )
+
+        last_pc_account = {
+            "img_id": result.img_id,
+            "pc_received_len": pc_received_len,
+            "saved_file_size": None,
+        }
 
     return False
+
+def parse_mcu_account(buf):
+    text = bytes(buf).decode("utf-8", errors="ignore")
+    match = MCU_ACCOUNT_RE.search(text)
+
+    if not match:
+        return None
+
+    return {
+        "img_id": int(match.group("img_id")),
+        "capture_len": int(match.group("capture_len")),
+        "tx_len": int(match.group("tx_len")),
+    }
+
+def extract_mcu_account_line(buf):
+    text = bytes(buf).decode("utf-8", errors="ignore")
+
+    for line in text.splitlines():
+        if "[MCU_ACCOUNT]" in line:
+            return line.strip()
+
+    return None
+
+def extract_cap_event_line(buf):
+    text = bytes(buf).decode("utf-8", errors="ignore")
+
+    for line in text.splitlines():
+        if "[CAP_EVT]" in line:
+            return line.strip()
+
+    return None
+
+def print_length_account(mcu_account):
+    if not mcu_account:
+        print("[ACCOUNT] MCU account missing")
+        return
+
+    if not last_pc_account:
+        print(
+            f"[ACCOUNT] img_id={mcu_account['img_id']} "
+            f"capture_len={mcu_account['capture_len']} "
+            f"tx_len={mcu_account['tx_len']} "
+            "pc_received_len=MISSING saved_file_size=MISSING result=FAIL"
+        )
+        return
+
+    capture_len = mcu_account["capture_len"]
+    tx_len = mcu_account["tx_len"]
+    pc_received_len = last_pc_account["pc_received_len"]
+    saved_file_size = last_pc_account["saved_file_size"]
+
+    ok = (
+        capture_len == tx_len and
+        tx_len == pc_received_len and
+        saved_file_size is not None and
+        pc_received_len == saved_file_size
+    )
+
+    print(
+        f"[ACCOUNT] img_id={mcu_account['img_id']} "
+        f"capture_len={capture_len} "
+        f"tx_len={tx_len} "
+        f"pc_received_len={pc_received_len} "
+        f"saved_file_size={saved_file_size} "
+        f"result={'OK' if ok else 'FAIL'}"
+    )
 
 def wait_for_mcu_standby_and_send_ready(ser):
     """
@@ -185,6 +291,53 @@ def wait_for_mcu_standby_and_send_ready(ser):
     except Exception:
         pass
 
+def wait_for_transfer_done_and_send_ack(ser, initial_buf=b""):
+    """
+    PC端传输终止握手：
+        1. 图片重组并保存后，继续等待 MCU 发送 TX_DONE
+        2. 收到 TX_DONE 后回复 DONE_ACK
+        3. 本轮传输正式结束，外层回到 STANDBY 等待状态
+    """
+
+    print("[PC] Waiting for TX_DONE...")
+
+    buf = bytes(initial_buf)
+    start = time.time()
+
+    while (time.time() - start) < TRANSFER_DONE_TIMEOUT_SEC:
+        if TRANSFER_DONE_REQ in buf:
+            cap_event_line = extract_cap_event_line(buf)
+            if cap_event_line:
+                print(cap_event_line)
+
+            mcu_account = parse_mcu_account(buf)
+            mcu_account_line = extract_mcu_account_line(buf)
+            if mcu_account_line:
+                print(mcu_account_line)
+            print_length_account(mcu_account)
+
+            ser.write(TRANSFER_DONE_ACK)
+            ser.flush()
+
+            print("[PC] TX_DONE received")
+            print("[PC] DONE_ACK sent")
+            return True
+
+        data = ser.read(128)
+
+        if data:
+            buf += data
+            print(f"[PC] END_HANDSHAKE RX: {data!r}")
+
+        if len(buf) > 1024:
+            buf = buf[-128:]
+
+        time.sleep(0.01)
+
+    print("[PC] TX_DONE timeout, return to standby")
+    print_length_account(parse_mcu_account(buf))
+    return False
+
 def main():
     """
     UART Image Receiver
@@ -200,6 +353,7 @@ def main():
     """
 
     global assembler
+    global last_pc_account
 
     # ===== 串口初始化 =====
     port_to_use = PORT if PORT else auto_detect_serial_port()
@@ -229,7 +383,9 @@ def main():
 
             buf = b""
             assembler = ImageChunkAssembler(timeout_sec=ASSEMBLY_TIMEOUT_SEC)
+            last_pc_account = None
             image_saved = False
+            transfer_done_handled = False
 
             print("[PC] Start receiving one image...")
 
@@ -239,6 +395,12 @@ def main():
                 if chunk:
                     buf += chunk
                     print(f"[PC] RX bytes={len(chunk)}, buffer={len(buf)}")
+
+                if b"[CAP_EVT]" in buf and TRANSFER_DONE_REQ in buf and SOF not in buf:
+                    wait_for_transfer_done_and_send_ack(ser, buf)
+                    transfer_done_handled = True
+                    image_saved = True
+                    break
 
                 while True:
                     frame, buf, err = try_parse_frame(buf)
@@ -263,7 +425,9 @@ def main():
 
                 time.sleep(0.002)
 
-            print("[PC] One image saved, waiting for next STANDBY...")
+            if not transfer_done_handled:
+                wait_for_transfer_done_and_send_ack(ser, buf)
+            print("[PC] Transfer ended, waiting for next STANDBY...")
 
     finally:
         try:

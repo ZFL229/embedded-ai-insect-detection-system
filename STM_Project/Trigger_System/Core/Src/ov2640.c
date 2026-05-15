@@ -17,6 +17,7 @@ typedef struct
 #define OV2640_REG_END   0xFF
 #define OV2640_VAL_END   0xFF
 
+/* OV2640 JPEG 模式基础寄存器表，来自传感器初始化参考配置。 */
 const unsigned char OV2640_JPEG_INIT[][2] = { { 0xff, 0x00 }, { 0x2c, 0xff }, {
 		0x2e, 0xdf }, { 0xff, 0x01 }, { 0x3c, 0x32 }, { 0x11, 0x00 }, { 0x09,
 		0x02 }, { 0x04, 0x28 }, { 0x13, 0xe5 }, { 0x14, 0x48 }, { 0x2c, 0x0c },
@@ -66,14 +67,17 @@ const unsigned char OV2640_JPEG_INIT[][2] = { { 0xff, 0x00 }, { 0x2c, 0xff }, {
 				0x24 }, { 0x53, 0x00 }, { 0x54, 0x00 }, { 0x55, 0x00 }, { 0x5A,
 				0x2c }, { 0x5b, 0x24 }, { 0x5c, 0x00 }, { 0xff, 0xff }, };
 
+/* 输出格式切换表：先配置 YUV422，再进入 JPEG 压缩路径。 */
 const unsigned char OV2640_YUV422[][2] = { { 0xFF, 0x00 }, { 0x05, 0x00 }, {
 		0xDA, 0x10 }, { 0xD7, 0x03 }, { 0xDF, 0x00 }, { 0x33, 0x80 }, { 0x3C,
 		0x40 }, { 0xe1, 0x77 }, { 0x00, 0x00 }, { 0xff, 0xff }, };
 
+/* JPEG 输出控制表。 */
 const unsigned char OV2640_JPEG[][2] = { { 0xe0, 0x14 }, { 0xe1, 0x77 }, { 0xe5,
 		0x1f }, { 0xd7, 0x03 }, { 0xda, 0x10 }, { 0xe0, 0x00 }, { 0xFF, 0x01 },
 		{ 0x04, 0x08 }, { 0xff, 0xff }, };
 
+/* 不同分辨率的 JPEG 窗口和缩放配置表。 */
 const unsigned char OV2640_160x120_JPEG[][2] = { { 0xFF, 0x01 }, { 0x12, 0x40 },
 		{ 0x17, 0x11 }, { 0x18, 0x43 }, { 0x19, 0x00 }, { 0x1a, 0x4b }, { 0x32,
 				0x09 }, { 0x4f, 0xca }, { 0x50, 0xa8 }, { 0x5a, 0x23 }, { 0x6d,
@@ -147,6 +151,7 @@ const unsigned char OV2640_1280x960_JPEG[][2] = { { 0xFF, 0x01 },
 				0x88 }, { 0x57, 0x00 }, { 0x5a, 0x40 }, { 0x5b, 0xf0 }, { 0x5c,
 				0x01 }, { 0xd3, 0x02 }, { 0xe0, 0x00 }, { 0xff, 0xff } };
 
+/* 白平衡/光照模式配置表。 */
 const unsigned char OV2640_LIGHT_MODE_AUTO[][2] = {
     { 0xff, 0x00 },
     { 0xc7, 0x00 },
@@ -166,6 +171,7 @@ const unsigned char OV2640_LIGHT_MODE_HOME[][2] = { { 0xff, 0x00 },
 		{ 0xc7, 0x40 }, { 0xcc, 0x42 }, { 0xcd, 0x3f }, { 0xce, 0x71 }, { 0xff,
 				0xff } };
 
+/* 控制 RESET 引脚完成一次 OV2640 硬件复位。 */
 void OV2640_HardwareReset(void)
 {
     HAL_GPIO_WritePin(DCMI_RESET_GPIO_Port, DCMI_RESET_Pin, GPIO_PIN_RESET);
@@ -175,6 +181,7 @@ void OV2640_HardwareReset(void)
     HAL_Delay(50);
 }
 
+/* 读取厂家 ID 和产品 ID，用于确认 SCCB 通信和摄像头在线。 */
 uint8_t OV2640_ReadID(uint8_t *mid_h, uint8_t *mid_l, uint8_t *pid, uint8_t *ver)
 {
     uint8_t ok = 1;
@@ -187,11 +194,13 @@ uint8_t OV2640_ReadID(uint8_t *mid_h, uint8_t *mid_l, uint8_t *pid, uint8_t *ver
     return ok;
 }
 
+/* 写入单个 OV2640 寄存器。 */
 uint8_t OV2640_WriteReg(uint8_t reg, uint8_t data)
 {
     return BSP_SCCB_WriteReg(OV2640_SCCB_ADDR, reg, data);
 }
 
+/* 顺序写入寄存器表，直到遇到 0xFF/0xFF 结束标记。 */
 static uint8_t OV2640_WriteRegList(const uint8_t (*list)[2])
 {
     uint8_t ok = 1;
@@ -207,6 +216,7 @@ static uint8_t OV2640_WriteRegList(const uint8_t (*list)[2])
     return ok;
 }
 
+/* 初始化 320x240 JPEG 输出。 */
 uint8_t OV2640_Init_320x240_JPEG(void)
 {
     uint8_t ok = 1;
@@ -226,6 +236,7 @@ uint8_t OV2640_Init_320x240_JPEG(void)
     return ok;
 }
 
+/* 初始化 640x480 JPEG 输出。 */
 uint8_t OV2640_Init_640x480_JPEG(void)
 {
     uint8_t ok = 1;
@@ -245,6 +256,7 @@ uint8_t OV2640_Init_640x480_JPEG(void)
     return ok;
 }
 
+/* 初始化 800x600 JPEG 输出。 */
 uint8_t OV2640_Init_800x600_JPEG(void)
 {
     uint8_t ok = 1;
@@ -264,6 +276,7 @@ uint8_t OV2640_Init_800x600_JPEG(void)
     return ok;
 }
 
+/* 初始化 1024x768 JPEG 输出。 */
 uint8_t OV2640_Init_1024x768_JPEG(void)
 {
     uint8_t ok = 1;
@@ -283,6 +296,7 @@ uint8_t OV2640_Init_1024x768_JPEG(void)
     return ok;
 }
 
+/* 初始化 1280x960 JPEG 输出，当前实验默认使用该分辨率。 */
 uint8_t OV2640_Init_1280x960_JPEG(void)
 {
     uint8_t ok = 1;
@@ -302,6 +316,7 @@ uint8_t OV2640_Init_1280x960_JPEG(void)
     return ok;
 }
 
+/* 设置光照/白平衡模式，mode=0 为自动。 */
 uint8_t OV2640_SetLightMode(uint8_t mode)
 {
     switch (mode)

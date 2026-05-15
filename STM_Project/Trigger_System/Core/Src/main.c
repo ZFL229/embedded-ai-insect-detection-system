@@ -27,6 +27,7 @@
 #include "camera_capture.h"
 #include "crc32.h"
 #include "uart_image_tx.h"
+#include "trigger_event.h"
 
 /* USER CODE END Includes */
 
@@ -37,6 +38,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define STARTUP_DUMMY_CAPTURE_TIMEOUT_MS  2000U
 
 /* USER CODE END PD */
 
@@ -112,15 +114,18 @@ int main(void)
   MX_DCMI_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+  /* 摄像头启动阶段的 ID 读取结果，当前主要用于调试器观察。 */
   uint8_t ov_mid_h = 0;
   uint8_t ov_mid_l = 0;
   uint8_t ov_pid   = 0;
   uint8_t ov_ver   = 0;
 
+  /* 确认 PCF8574 在线，并通过 PWDN 控制位释放 OV2640。 */
   BSP_PCF8574_Check();
 
   BSP_PCF8574_CameraPowerOn();
 
+  /* 初始化软件 SCCB 总线，随后复位并配置 OV2640 JPEG 输出。 */
   BSP_SCCB_Init();
 
   OV2640_HardwareReset();
@@ -129,27 +134,17 @@ int main(void)
 
   OV2640_Init_1280x960_JPEG();
 
+  /* 使用自动白平衡/光照模式。 */
   OV2640_SetLightMode(0);
 
   HAL_Delay(300);
 
-  UART_Image_WaitForPCReady(&huart1);
+  /* 丢弃上电后的首帧，避开 OV2640 自动曝光/白平衡初始收敛阶段。 */
+  (void)CameraCapture_SnapshotByFrameEvent(&hdcmi, STARTUP_DUMMY_CAPTURE_TIMEOUT_MS);
+  CameraCapture_ClearBuffer();
 
-  CameraCapture_SnapshotByDelay(&hdcmi);
-
-  volatile uint32_t debug_buf_addr = (uint32_t)cam_frame_buffer;
-  volatile uint32_t debug_jpg_len  = cam_state.jpg_len;
-  volatile uint32_t debug_first_word = cam_frame_buffer[0];
-
-  if (cam_state.jpg_len > 0)
-  {
-      UART_Image_SendJpeg(
-          &huart1,
-          1,
-          (uint8_t *)cam_frame_buffer,
-          cam_state.jpg_len
-      );
-  }
+  /* 初始化 PH2/PH3 触发事件模块，后续主循环只调用 TriggerEvent_Process()。 */
+  TriggerEvent_Init(&hdcmi, &huart1);
 
   /* USER CODE END 2 */
 
@@ -160,6 +155,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+      /* 轮询按键事件：PH2 采集图像，PH3 发送当前 JPEG。 */
+      TriggerEvent_Process();
+
   }
   /* USER CODE END 3 */
 }
@@ -390,6 +388,12 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(DCMI_SCL_GPIO_Port, DCMI_SCL_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pins : PH2 PH3 */
+  GPIO_InitStruct.Pin = GPIO_PIN_2|GPIO_PIN_3;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
 
   /*Configure GPIO pin : DCMI_RESET_Pin */
   GPIO_InitStruct.Pin = DCMI_RESET_Pin;

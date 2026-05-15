@@ -15,14 +15,11 @@
 #define FRAME_EOF_1  0xAA
 #define FRAME_VER    0x01
 
-#define UART_IMG_HANDSHAKE_REQ      "STANDBY\r\n"
-#define UART_IMG_HANDSHAKE_ACK      "READY"
-#define UART_IMG_HANDSHAKE_PERIOD   500
-
 #define FRAME_HEADER_SIZE 10
 #define FRAME_TAIL_SIZE   6
 #define CHUNK_HEADER_SIZE 5
 
+/* 单帧发送缓冲区：帧头 + chunk 头 + chunk 数据 + CRC/帧尾。 */
 static uint8_t tx_frame_buf[
     FRAME_HEADER_SIZE +
     CHUNK_HEADER_SIZE +
@@ -30,53 +27,10 @@ static uint8_t tx_frame_buf[
     FRAME_TAIL_SIZE
 ];
 
-HAL_StatusTypeDef UART_Image_WaitForPCReady(UART_HandleTypeDef *huart)
-{
-    const uint8_t req_msg[] = UART_IMG_HANDSHAKE_REQ;
-    const char ack_msg[] = UART_IMG_HANDSHAKE_ACK;
-
-    uint8_t rx_byte = 0;
-    uint8_t ack_index = 0;
-    uint32_t last_req_tick = 0;
-
-    if (huart == NULL)
-    {
-        return HAL_ERROR;
-    }
-
-    while (1)
-    {
-        if ((HAL_GetTick() - last_req_tick) >= UART_IMG_HANDSHAKE_PERIOD)
-        {
-            HAL_UART_Transmit(
-                huart,
-                (uint8_t *)req_msg,
-                sizeof(req_msg) - 1,
-                1000
-            );
-
-            last_req_tick = HAL_GetTick();
-        }
-
-        if (HAL_UART_Receive(huart, &rx_byte, 1, 50) == HAL_OK)
-        {
-            if (rx_byte == ack_msg[ack_index])
-            {
-                ack_index++;
-
-                if (ack_index >= 5)
-                {
-                    return HAL_OK;
-                }
-            }
-            else
-            {
-                ack_index = (rx_byte == ack_msg[0]) ? 1 : 0;
-            }
-        }
-    }
-}
-
+/*
+ * 将 JPEG 数据按固定 chunk 大小切分，并封装为现有 UART 图像帧发送。
+ * 帧结构和 chunk 协议在这里集中构造，外层握手由 trigger_event.c 负责。
+ */
 HAL_StatusTypeDef UART_Image_SendJpeg(
     UART_HandleTypeDef *huart,
     uint8_t img_id,
@@ -139,9 +93,7 @@ HAL_StatusTypeDef UART_Image_SendJpeg(
 
         memcpy(&tx_frame_buf[15], &jpeg_buf[offset], chunk_len);
 
-        /*
-         * CRC32 只对 payload 计算
-         */
+        /* CRC32 只覆盖 payload，帧头和帧尾不参与计算。 */
         uint32_t crc = CRC32_Calc(&tx_frame_buf[10], payload_len);
 
         uint32_t crc_pos = FRAME_HEADER_SIZE + payload_len;

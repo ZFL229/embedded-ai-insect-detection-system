@@ -5,7 +5,7 @@ PC Frame Service (Chunk + AI Integrated Version)
 ------------------------------------------------------------
 本模块是系统的“通信 + AI 推理服务节点”，负责：
 
-    1. 接收图像分片帧（TCP）
+    1. 接收 MCU 通过 UART 发送的图像分片帧
     2. 在通信层完成图像重组（ImageChunkAssembler）
     3. 将完整图像交给 AI 推理
     4. 缓存最新推理结果
@@ -15,7 +15,7 @@ PC Frame Service (Chunk + AI Integrated Version)
 ------------------------------------------------------------
     MCU / Sender
         ↓
-    TCP（图像上行）
+        UART（图像上行）
         ↓
     PC通信模块（本文件）
         ↓
@@ -36,6 +36,8 @@ from serial.tools import list_ports
 import time
 import sys
 import re
+import queue
+import threading
 from pathlib import Path
 
 # 让脚本无论从哪里启动，都能 import Ai_module
@@ -44,20 +46,43 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 # ===== Frame codec（阶段三新增）=====
 # 要求你的 frame_codec.py 在 PROJECT_ROOT 下，或在 sys.path 能找到
-from frame_codec import SOF, try_parse_frame
+from frame_codec import SOF, try_parse_frame, pack_frame
 from image_chunk_protocol import ImageChunkAssembler
+
+YoloInfer = None
+binary_decision = None
 
 # ===== 串口参数 =====
 PORT = None  # None = 自动检测 CH340/CH341 串口
 BAUD = 115200
 
 # ===== Frame Types（按你 MCU 端约定）=====
-TYPE_IMAGE = 0x03   
+TYPE_REQ = 0x01
+TYPE_RESULT = 0x02
+TYPE_IMAGE = 0x03
+
+# ===== AI 推理参数 =====
+MODEL_PATH = Path(r"C:\Users\linzh\Desktop\Final_Project\runs_mvp\insect_det_v7_mvp3\weights\best.pt")
+YOLO_CONF = 0.45
+DECISION_CONF = 0.45
+IMG_SIZE = 320
+IOU = 0.30
 
 # ===== 分片重组 =====
 ASSEMBLY_TIMEOUT_SEC = 5.0
 assembler = ImageChunkAssembler(timeout_sec=ASSEMBLY_TIMEOUT_SEC)
 last_pc_account = None
+
+# ===== AI 状态与结果缓存 =====
+infer_engine = None
+_cache_label = "NO"
+_cache_conf = 0.0
+_cache_ts = 0.0
+_last_img_id = None
+
+INFERENCE_QUEUE_SIZE = 1
+inference_queue = queue.Queue(maxsize=INFERENCE_QUEUE_SIZE)
+stop_event = threading.Event()
 
 # ===== 传输终止握手 =====
 TRANSFER_DONE_REQ = b"TX_DONE"
@@ -115,6 +140,106 @@ def auto_detect_serial_port():
 
     return None
 
+def init_ai():
+    global infer_engine
+    global YoloInfer
+    global binary_decision
+
+    if infer_engine is not None:
+        return
+
+    if YoloInfer is None or binary_decision is None:
+        try:
+            from Ai_module.ai_infer import YoloInfer as _YoloInfer
+            from Ai_module.binary_decision import binary_insect_decision_debug as _binary_decision
+            YoloInfer = _YoloInfer
+            binary_decision = _binary_decision
+        except KeyboardInterrupt:
+            print("[AI] import interrupted, AI disabled for this run")
+            return
+        except BaseException as exc:
+            print(f"[AI] import failed, AI disabled: {type(exc).__name__}: {exc}")
+            return
+
+    if YoloInfer is None or binary_decision is None:
+        print("[AI] disabled: import unavailable")
+        return
+
+    if not MODEL_PATH.exists():
+        print(f"[AI] disabled: model not found: {MODEL_PATH}")
+        return
+
+    infer_engine = YoloInfer(MODEL_PATH)
+    print(f"[AI] loaded model: {MODEL_PATH}")
+
+def infer_image_path(img_id: int, img_path: Path):
+    global _cache_label, _cache_conf, _cache_ts
+
+    if infer_engine is None or binary_decision is None:
+        return
+
+    dets = infer_engine.infer_image(
+        img_path,
+        conf=YOLO_CONF,
+        iou=IOU,
+        imgsz=IMG_SIZE,
+        save=False,
+        save_txt=False,
+        project=str(SAVE_DIR),
+        name="ai_predict",
+    )
+    info = binary_decision(dets, conf_threshold=DECISION_CONF, min_count=1)
+
+    _cache_label = "YES" if info.y == 1 else "NO"
+    _cache_conf = float(info.max_confidence)
+    _cache_ts = time.time()
+
+    print(
+        f"[AI] updated img_id={img_id} -> "
+        f"{_cache_label} conf={_cache_conf:.2f} reason={info.reason}"
+    )
+
+def enqueue_inference(img_id: int, img_path: Path):
+    if infer_engine is None:
+        return
+
+    try:
+        if inference_queue.full():
+            old_img_id, _ = inference_queue.get_nowait()
+            inference_queue.task_done()
+            print(f"[AI] drop old pending img_id={old_img_id}")
+
+        inference_queue.put_nowait((img_id, img_path))
+        print(f"[AI] enqueued img_id={img_id}, path={img_path.name}")
+    except Exception as exc:
+        print(f"[AI] enqueue ERROR img_id={img_id}: {exc}")
+
+def ai_worker():
+    while not stop_event.is_set():
+        try:
+            item = inference_queue.get(timeout=0.2)
+        except queue.Empty:
+            continue
+
+        if item is None:
+            inference_queue.task_done()
+            break
+
+        img_id, img_path = item
+
+        try:
+            print(f"[AI] start img_id={img_id}, path={img_path.name}")
+            infer_image_path(img_id, img_path)
+            print(f"[AI] done img_id={img_id}, result={_cache_label}, conf={_cache_conf:.2f}")
+        except Exception as exc:
+            print(f"[AI] ERROR img_id={img_id}: {type(exc).__name__}: {exc}")
+        finally:
+            inference_queue.task_done()
+
+def build_result_frame(req_seq: int) -> bytes:
+    payload = b"YES" if _cache_label == "YES" else b"NO!"
+    return pack_frame(payload, frame_type=TYPE_RESULT, seq=req_seq)
+
 def handle_image_frame(frame):
     """
     分片模式：
@@ -130,6 +255,7 @@ def handle_image_frame(frame):
     """
 
     global last_pc_account
+    global _last_img_id
 
     result = assembler.handle_frame(frame)
 
@@ -138,6 +264,8 @@ def handle_image_frame(frame):
         jpeg_bytes = result.data
         pc_received_len = len(jpeg_bytes)
         saved_file_size = None
+        out_path = None
+        _last_img_id = result.img_id
 
         print(
             f"[PC] IMAGE COMPLETE: "
@@ -171,6 +299,7 @@ def handle_image_frame(frame):
                 "pc_received_len": pc_received_len,
                 "saved_file_size": saved_file_size,
             }
+            enqueue_inference(result.img_id, out_path)
             return True
 
         print("[PC] image reassembled, save disabled")
@@ -185,6 +314,7 @@ def handle_image_frame(frame):
             "pc_received_len": pc_received_len,
             "saved_file_size": None,
         }
+        return True
 
     return False
 
@@ -356,6 +486,10 @@ def main():
     global last_pc_account
 
     # ===== 串口初始化 =====
+    init_ai()
+    worker = threading.Thread(target=ai_worker, daemon=True)
+    worker.start()
+
     port_to_use = PORT if PORT else auto_detect_serial_port()
 
     if not port_to_use:
@@ -411,6 +545,17 @@ def main():
                     if not frame:
                         break
 
+                    if frame.type == TYPE_REQ:
+                        out = build_result_frame(frame.seq)
+                        ser.write(out)
+                        ser.flush()
+                        print(
+                            f"[PC] RX REQ seq={frame.seq} "
+                            f"-> TX {(_cache_label.encode() if _cache_label == 'YES' else b'NO!')!r} "
+                            f"(conf={_cache_conf:.2f}, last_img_id={_last_img_id})"
+                        )
+                        continue
+
                     if frame.type == TYPE_IMAGE:
                         if handle_image_frame(frame):
                             image_saved = True
@@ -430,6 +575,13 @@ def main():
             print("[PC] Transfer ended, waiting for next STANDBY...")
 
     finally:
+        stop_event.set()
+
+        try:
+            inference_queue.put_nowait(None)
+        except Exception:
+            pass
+
         try:
             ser.close()
         except Exception:

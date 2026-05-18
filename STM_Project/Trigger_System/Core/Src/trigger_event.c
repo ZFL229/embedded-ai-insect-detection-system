@@ -27,9 +27,8 @@
 
 /*
  * 模块职责：
- * - 将 PH2/PH3 的按键事件转换成图像系统动作。
- * - PH2：采集一帧图像到 cam_frame_buffer，并更新 cam_state。
- * - PH3：不重新采集，只发送当前缓冲区中的 JPEG。
+ * - 将 PH2 按键事件转换成完整图像流程。
+ * - PH2：采集一帧图像到 cam_frame_buffer，随后立即发送 JPEG 并输出对账日志。
  *
  * 当前实验约束：
  * - 不修改 UART 帧结构、chunk 协议或 PC 端握手机制。
@@ -143,9 +142,9 @@ static HAL_StatusTypeDef TriggerEvent_NotifyTransferDone(void)
 }
 
 /* 发送长度对账日志，用于比对采集长度、发送长度、PC 接收长度和保存文件大小。 */
-static HAL_StatusTypeDef TriggerEvent_SendAccountLog(uint8_t img_id, uint32_t tx_len)
+static HAL_StatusTypeDef TriggerEvent_SendAccountLog(uint8_t img_id, uint32_t tx_len, uint8_t tx_status)
 {
-    char log_buf[192];
+    char log_buf[224];
     int log_len;
 
     if (g_trigger_huart == NULL)
@@ -157,11 +156,12 @@ static HAL_StatusTypeDef TriggerEvent_SendAccountLog(uint8_t img_id, uint32_t tx
         log_buf,
         sizeof(log_buf),
         "[MCU_ACCOUNT] img_id=%u capture_len=%lu tx_len=%lu "
-        "mode=%u wait=%u timeout=%u done_bd=%u err_bd=%u done_ad=%u err_ad=%u done_stop=%u err_stop=%u "
+        "tx_status=%u mode=%u wait=%u timeout=%u done_bd=%u err_bd=%u done_ad=%u err_ad=%u done_stop=%u err_stop=%u "
         "soi=%lu eoi=%lu\r\n",
         (unsigned int)img_id,
         (unsigned long)g_trigger_last_capture_len,
         (unsigned long)tx_len,
+        (unsigned int)tx_status,
         (unsigned int)cam_state.capture_mode,
         (unsigned int)cam_state.wait_result,
         (unsigned int)cam_state.timeout,
@@ -279,77 +279,109 @@ static HAL_StatusTypeDef TriggerEvent_WaitForTransferDoneAck(void)
  * 执行一次图像采集。
  * 当前通过 TRIGGER_EVENT_CAPTURE_MODE 选择 A 组时间截取或 B 组事件截取。
  */
-static void TriggerEvent_CaptureImage(void)
+static HAL_StatusTypeDef TriggerEvent_CaptureImage(void)
 {
     if (g_trigger_hdcmi == NULL)
     {
-        return;
+        return HAL_ERROR;
     }
 
 #if TRIGGER_EVENT_CAPTURE_MODE == CAMERA_CAPTURE_MODE_FRAMEEVENT
-    CameraCapture_SnapshotByFrameEvent(g_trigger_hdcmi, TRIGGER_EVENT_CAPTURE_TIMEOUT_MS);
+    if (CameraCapture_SnapshotByFrameEvent(g_trigger_hdcmi, TRIGGER_EVENT_CAPTURE_TIMEOUT_MS) != HAL_OK)
+    {
+        g_trigger_last_capture_len = cam_state.jpg_len;
+        return HAL_ERROR;
+    }
 #else
-    CameraCapture_SnapshotByDelay(g_trigger_hdcmi);
+    if (CameraCapture_SnapshotByDelay(g_trigger_hdcmi) != HAL_OK)
+    {
+        g_trigger_last_capture_len = cam_state.jpg_len;
+        return HAL_ERROR;
+    }
 #endif
 
     g_trigger_last_capture_len = cam_state.jpg_len;
+    return (TriggerEvent_HasValidJpeg() == 1U) ? HAL_OK : HAL_ERROR;
 }
 
 /*
  * 发送当前缓冲区中的 JPEG。
  * 如果没有有效 JPEG，也会完成一次 PC 握手并发送采集日志和 TX_DONE，避免 PC 端卡在接收状态。
  */
-static void TriggerEvent_SendCurrentImage(void)
+static HAL_StatusTypeDef TriggerEvent_SendCurrentImage(void)
 {
     uint32_t tx_len = 0U;
+    HAL_StatusTypeDef tx_status = HAL_ERROR;
 
     if (g_trigger_huart == NULL)
     {
-        return;
+        return HAL_ERROR;
     }
 
     if (TriggerEvent_HasValidJpeg() == 0U)
     {
-        if (TriggerEvent_WaitForPCReady() == HAL_OK)
-        {
-            (void)TriggerEvent_SendCaptureEventLog(g_trigger_img_id);
-
-            if (TriggerEvent_NotifyTransferDone() == HAL_OK)
-            {
-                (void)TriggerEvent_WaitForTransferDoneAck();
-                TriggerEvent_FullAcquisitionChainRebuild();
-            }
-        }
-
-        return;
+        (void)TriggerEvent_SendCaptureEventLog(g_trigger_img_id);
+        (void)TriggerEvent_SendAccountLog(g_trigger_img_id, 0U, 2U);
+        return HAL_ERROR;
     }
 
     if (TriggerEvent_WaitForPCReady() != HAL_OK)
     {
-        return;
+        return HAL_ERROR;
     }
 
     tx_len = cam_state.jpg_len;
 
-    if (UART_Image_SendJpeg(
-            g_trigger_huart,
-            g_trigger_img_id,
-            (uint8_t *)cam_frame_buffer,
-            tx_len
-        ) == HAL_OK)
+    tx_status = UART_Image_SendJpeg(
+        g_trigger_huart,
+        g_trigger_img_id,
+        (uint8_t *)cam_frame_buffer,
+        tx_len
+    );
+
+    (void)TriggerEvent_SendCaptureEventLog(g_trigger_img_id);
+    (void)TriggerEvent_SendAccountLog(
+        g_trigger_img_id,
+        (tx_status == HAL_OK) ? tx_len : 0U,
+        (tx_status == HAL_OK) ? 0U : 1U
+    );
+
+    if (tx_status != HAL_OK)
     {
-        (void)TriggerEvent_SendCaptureEventLog(g_trigger_img_id);
-        (void)TriggerEvent_SendAccountLog(g_trigger_img_id, tx_len);
-
-        if (TriggerEvent_NotifyTransferDone() != HAL_OK)
-        {
-            return;
-        }
-
-        (void)TriggerEvent_WaitForTransferDoneAck();
-        TriggerEvent_FullAcquisitionChainRebuild();
-        g_trigger_img_id++;
+        return HAL_ERROR;
     }
+
+    if (TriggerEvent_NotifyTransferDone() != HAL_OK)
+    {
+        return HAL_ERROR;
+    }
+
+    if (TriggerEvent_WaitForTransferDoneAck() != HAL_OK)
+    {
+        return HAL_ERROR;
+    }
+
+    return HAL_OK;
+}
+
+static void TriggerEvent_CaptureAndSend(void)
+{
+    if (TriggerEvent_CaptureImage() != HAL_OK)
+    {
+        goto fail_cleanup;
+    }
+
+    if (TriggerEvent_SendCurrentImage() != HAL_OK)
+    {
+        goto fail_cleanup;
+    }
+
+    TriggerEvent_FullAcquisitionChainRebuild();
+    g_trigger_img_id++;
+    return;
+
+fail_cleanup:
+    TriggerEvent_FullAcquisitionChainRebuild();
 }
 
 /* 初始化触发事件模块，保存外设句柄并复位按键状态。 */
@@ -363,16 +395,11 @@ void TriggerEvent_Init(DCMI_HandleTypeDef *hdcmi, UART_HandleTypeDef *huart)
     TriggerButton_Init();
 }
 
-/* 主循环调度入口：PH2 采集，PH3 发送。 */
+/* 主循环调度入口：PH2 单键触发采集、传输和对账。 */
 void TriggerEvent_Process(void)
 {
     if (TriggerButton_ScanPH2Event() == 1U)
     {
-        TriggerEvent_CaptureImage();
-    }
-
-    if (TriggerButton_ScanPH3Event() == 1U)
-    {
-        TriggerEvent_SendCurrentImage();
+        TriggerEvent_CaptureAndSend();
     }
 }

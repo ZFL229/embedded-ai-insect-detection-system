@@ -12,13 +12,13 @@
 
 /*
  * 初始化触发事件模块。
- * 保存 DCMI 和 UART 句柄，并初始化 PH2/PH3 按键状态机。
+ * 保存 DCMI 和 UART 句柄，并初始化 PH2 单键状态机。
  */
 void TriggerEvent_Init(DCMI_HandleTypeDef *hdcmi, UART_HandleTypeDef *huart);
 
 /*
  * 周期性事件调度入口，应在 main while(1) 中调用。
- * PH2 触发图像采集，PH3 触发当前 JPEG 缓冲区发送。
+ * PH2 触发一次采集、传输和对账流程。
  */
 void TriggerEvent_Process(void);
 

@@ -143,7 +143,7 @@ int main(void)
   (void)CameraCapture_SnapshotByFrameEvent(&hdcmi, STARTUP_DUMMY_CAPTURE_TIMEOUT_MS);
   CameraCapture_ClearBuffer();
 
-  /* 初始化 PH2/PH3 触发事件模块，后续主循环只调用 TriggerEvent_Process()。 */
+  /* 初始化 PH2 单键触发事件模块，后续主循环只调用 TriggerEvent_Process()。 */
   TriggerEvent_Init(&hdcmi, &huart1);
 
   /* USER CODE END 2 */
@@ -155,7 +155,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-      /* 轮询按键事件：PH2 采集图像，PH3 发送当前 JPEG。 */
+      /* 轮询 PH2 单键事件：采集图像后立即传输并输出对账日志。 */
       TriggerEvent_Process();
 
   }
@@ -389,8 +389,8 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(DCMI_SCL_GPIO_Port, DCMI_SCL_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : PH2 PH3 */
-  GPIO_InitStruct.Pin = GPIO_PIN_2|GPIO_PIN_3;
+  /*Configure GPIO pin : PH2 */
+  GPIO_InitStruct.Pin = GPIO_PIN_2;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);

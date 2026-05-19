@@ -317,6 +317,43 @@ uint8_t OV2640_Init_1280x960_JPEG(void)
 }
 
 /* 设置光照/白平衡模式，mode=0 为自动。 */
+/* Reset OV2640 registers to sensor defaults through SCCB. */
+uint8_t OV2640_SoftwareReset(void)
+{
+    uint8_t ok = 1;
+
+    ok &= OV2640_WriteReg(0xff, 0x01);
+    ok &= OV2640_WriteReg(0x12, 0x80);
+    HAL_Delay(100);
+
+    return ok;
+}
+
+/* Enable OV2640 advanced automatic white balance. */
+uint8_t OV2640_AdvancedWhiteBalance(void)
+{
+    uint8_t ok = 1;
+
+    ok &= OV2640_WriteReg(0xff, 0x00);
+    HAL_Delay(1);
+    ok &= OV2640_WriteReg(0xc7, 0x00);
+
+    return ok;
+}
+
+/* Enable OV2640 simple automatic white balance. */
+uint8_t OV2640_SimpleWhiteBalance(void)
+{
+    uint8_t ok = 1;
+
+    ok &= OV2640_WriteReg(0xff, 0x00);
+    HAL_Delay(1);
+    ok &= OV2640_WriteReg(0xc7, 0x10);
+
+    return ok;
+}
+
+/* Set light/white-balance mode, mode 0 is automatic. */
 uint8_t OV2640_SetLightMode(uint8_t mode)
 {
     switch (mode)
@@ -331,6 +368,10 @@ uint8_t OV2640_SetLightMode(uint8_t mode)
         return OV2640_WriteRegList(OV2640_LIGHT_MODE_OFFICE);
     case 4:
         return OV2640_WriteRegList(OV2640_LIGHT_MODE_HOME);
+    case 5:
+        return OV2640_AdvancedWhiteBalance();
+    case 6:
+        return OV2640_SimpleWhiteBalance();
     default:
         return 0;
     }

@@ -135,7 +135,7 @@ int main(void)
   OV2640_Init_1280x960_JPEG();
 
   /* 使用自动白平衡/光照模式。 */
-  OV2640_SetLightMode(0);
+  OV2640_SetLightMode(6);
 
   HAL_Delay(300);
 

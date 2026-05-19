@@ -27,8 +27,12 @@ uint8_t OV2640_Init_640x480_JPEG(void);
 uint8_t OV2640_Init_800x600_JPEG(void);
 uint8_t OV2640_Init_1024x768_JPEG(void);
 uint8_t OV2640_Init_1280x960_JPEG(void);
+uint8_t OV2640_SoftwareReset(void);
 
 /* 设置白平衡/光照模式，mode=0 表示自动模式。 */
+/* Light mode: 0=auto table, 1=sunny, 2=cloudy, 3=office, 4=home, 5=advanced AWB, 6=simple AWB. */
+uint8_t OV2640_AdvancedWhiteBalance(void);
+uint8_t OV2640_SimpleWhiteBalance(void);
 uint8_t OV2640_SetLightMode(uint8_t mode);
 
 #endif /* INC_OV2640_H_ */

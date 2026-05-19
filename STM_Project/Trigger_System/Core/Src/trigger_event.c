@@ -9,6 +9,7 @@
 #include "trigger_button.h"
 #include "bsp_pcf8574.h"
 #include "camera_capture.h"
+#include "ov2640.h"
 #include "uart_image_tx.h"
 #include <stddef.h>
 #include <stdio.h>
@@ -23,7 +24,8 @@
 #define TRIGGER_EVENT_CAPTURE_TIMEOUT_MS      2000U
 #define TRIGGER_EVENT_CAPTURE_MODE            CAMERA_CAPTURE_MODE_FRAMEEVENT
 // CAMERA_CAPTURE_MODE_DELAY / CAMERA_CAPTURE_MODE_FRAMEEVENT
-#define TRIGGER_EVENT_FULL_REBUILD_AFTER_TX   1U
+#define TRIGGER_EVENT_MIN_VALID_CAPTURE_LEN   32000U
+#define TRIGGER_EVENT_BASELINE_LIGHT_MODE     6U
 
 /*
  * 模块职责：
@@ -40,20 +42,58 @@ static UART_HandleTypeDef *g_trigger_huart = NULL;
 static uint8_t g_trigger_img_id = 1U;
 static uint32_t g_trigger_last_capture_len = 0U;
 
-/*
- * 发送结束后的摄像头恢复流程。
- * 当前只通过 PWDN 让 OV2640 进行深恢复，避免 DCMI/DMA/I2C/寄存器重配带来额外副作用。
- */
-static void TriggerEvent_FullAcquisitionChainRebuild(void)
+typedef enum
 {
-#if TRIGGER_EVENT_FULL_REBUILD_AFTER_TX
+    TRIGGER_EVENT_RECOVERY_NORMAL = 0,
+    TRIGGER_EVENT_RECOVERY_SOFT_PENDING,
+    TRIGGER_EVENT_RECOVERY_HARD_PENDING
+} TriggerEvent_RecoveryState;
+
+static TriggerEvent_RecoveryState g_trigger_recovery_state = TRIGGER_EVENT_RECOVERY_NORMAL;
+
+static void TriggerEvent_ApplyBaselineCameraConfig(void)
+{
+    (void)OV2640_Init_1280x960_JPEG();
+    (void)OV2640_SetLightMode(TRIGGER_EVENT_BASELINE_LIGHT_MODE);
+    HAL_Delay(300);
+    CameraCapture_ClearBuffer();
+}
+
+static void TriggerEvent_SoftRecovery(void)
+{
+    (void)OV2640_SoftwareReset();
+    TriggerEvent_ApplyBaselineCameraConfig();
+}
+
+static void TriggerEvent_HardRecovery(void)
+{
     BSP_PCF8574_CameraPowerDown();
     HAL_Delay(50);
     BSP_PCF8574_CameraPowerOn();
     HAL_Delay(300);
 
-    CameraCapture_ClearBuffer();
-#endif
+    OV2640_HardwareReset();
+    TriggerEvent_ApplyBaselineCameraConfig();
+}
+
+/* Recovery state machine based on the last captured JPEG length. */
+static void TriggerEvent_FullAcquisitionChainRebuild(void)
+{
+    if (g_trigger_last_capture_len >= TRIGGER_EVENT_MIN_VALID_CAPTURE_LEN)
+    {
+        g_trigger_recovery_state = TRIGGER_EVENT_RECOVERY_NORMAL;
+        return;
+    }
+
+    if (g_trigger_recovery_state == TRIGGER_EVENT_RECOVERY_NORMAL)
+    {
+        TriggerEvent_SoftRecovery();
+        g_trigger_recovery_state = TRIGGER_EVENT_RECOVERY_SOFT_PENDING;
+        return;
+    }
+
+    TriggerEvent_HardRecovery();
+    g_trigger_recovery_state = TRIGGER_EVENT_RECOVERY_HARD_PENDING;
 }
 
 /* 判断当前缓冲区中是否存在可发送的 JPEG 数据。 */
@@ -391,6 +431,7 @@ void TriggerEvent_Init(DCMI_HandleTypeDef *hdcmi, UART_HandleTypeDef *huart)
     g_trigger_huart = huart;
     g_trigger_img_id = 1U;
     g_trigger_last_capture_len = 0U;
+    g_trigger_recovery_state = TRIGGER_EVENT_RECOVERY_NORMAL;
 
     TriggerButton_Init();
 }

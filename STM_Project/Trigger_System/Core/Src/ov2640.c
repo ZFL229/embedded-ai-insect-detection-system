@@ -316,8 +316,7 @@ uint8_t OV2640_Init_1280x960_JPEG(void)
     return ok;
 }
 
-/* 设置光照/白平衡模式，mode=0 为自动。 */
-/* Reset OV2640 registers to sensor defaults through SCCB. */
+/* 通过 SCCB 触发 OV2640 软件复位，使寄存器恢复到传感器默认状态。 */
 uint8_t OV2640_SoftwareReset(void)
 {
     uint8_t ok = 1;
@@ -329,7 +328,7 @@ uint8_t OV2640_SoftwareReset(void)
     return ok;
 }
 
-/* Enable OV2640 advanced automatic white balance. */
+/* 启用 OV2640 高级自动白平衡模式，用于和基础 AUTO_MODE 对比。 */
 uint8_t OV2640_AdvancedWhiteBalance(void)
 {
     uint8_t ok = 1;
@@ -341,7 +340,7 @@ uint8_t OV2640_AdvancedWhiteBalance(void)
     return ok;
 }
 
-/* Enable OV2640 simple automatic white balance. */
+/* 启用 OV2640 简单自动白平衡模式，当前稳定基线使用该模式。 */
 uint8_t OV2640_SimpleWhiteBalance(void)
 {
     uint8_t ok = 1;
@@ -353,7 +352,7 @@ uint8_t OV2640_SimpleWhiteBalance(void)
     return ok;
 }
 
-/* Set light/white-balance mode, mode 0 is automatic. */
+/* 设置光照/白平衡模式：0=自动表，1=晴天，2=阴天，3=办公室，4=家庭，5=高级 AWB，6=简单 AWB。 */
 uint8_t OV2640_SetLightMode(uint8_t mode)
 {
     switch (mode)

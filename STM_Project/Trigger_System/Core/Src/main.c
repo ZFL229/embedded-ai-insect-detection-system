@@ -39,6 +39,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define STARTUP_DUMMY_CAPTURE_TIMEOUT_MS  2000U
+#define STARTUP_DUMMY_CAPTURE_COUNT       3U
 
 /* USER CODE END PD */
 
@@ -114,7 +115,7 @@ int main(void)
   MX_DCMI_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  /* 摄像头启动阶段的 ID 读取结果，当前主要用于调试器观察。 */
+  /* 摄像头启动阶段的 ID 读取结果，当前主要用于调试器观察 SCCB 通信是否正常。 */
   uint8_t ov_mid_h = 0;
   uint8_t ov_mid_l = 0;
   uint8_t ov_pid   = 0;
@@ -134,13 +135,16 @@ int main(void)
 
   OV2640_Init_1280x960_JPEG();
 
-  /* 使用自动白平衡/光照模式。 */
+  /* 使用当前按键采集稳定基线的白平衡/光照模式。 */
   OV2640_SetLightMode(6);
 
   HAL_Delay(300);
 
-  /* 丢弃上电后的首帧，避开 OV2640 自动曝光/白平衡初始收敛阶段。 */
-  (void)CameraCapture_SnapshotByFrameEvent(&hdcmi, STARTUP_DUMMY_CAPTURE_TIMEOUT_MS);
+  /* 丢弃上电后的预热帧，避开 OV2640 曝光/白平衡/ISP 初始收敛阶段。 */
+  for (uint8_t i = 0U; i < STARTUP_DUMMY_CAPTURE_COUNT; i++)
+  {
+    (void)CameraCapture_SnapshotByFrameEvent(&hdcmi, STARTUP_DUMMY_CAPTURE_TIMEOUT_MS);
+  }
   CameraCapture_ClearBuffer();
 
   /* 初始化 PH2 单键触发事件模块，后续主循环只调用 TriggerEvent_Process()。 */

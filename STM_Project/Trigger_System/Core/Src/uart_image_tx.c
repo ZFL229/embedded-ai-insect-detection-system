@@ -62,7 +62,7 @@ HAL_StatusTypeDef UART_Image_SendJpeg(
         uint32_t payload_len = CHUNK_HEADER_SIZE + chunk_len;
 
         /*
-         * 底层 frame header:
+         * 底层帧头：
          * SOF(2) | VER(1) | TYPE(1) | SEQ(2) | LEN(4)
          */
         tx_frame_buf[0] = FRAME_SOF_0;
@@ -80,7 +80,7 @@ HAL_StatusTypeDef UART_Image_SendJpeg(
         tx_frame_buf[9] = (payload_len >> 24) & 0xFF;
 
         /*
-         * IMAGE_CHUNK payload:
+         * 图像分片负载：
          * IMG_ID(1) | CHUNK_SEQ(2) | CHUNK_TOTAL(2) | CHUNK_DATA(n)
          */
         tx_frame_buf[10] = img_id;

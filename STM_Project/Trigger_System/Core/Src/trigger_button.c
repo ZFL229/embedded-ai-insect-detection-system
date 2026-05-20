@@ -21,12 +21,14 @@ typedef struct
     uint32_t tick;
 } TriggerButton_Context_t;
 
+/* PH2 按键上下文：当前按键采集系统的唯一触发源。 */
 static TriggerButton_Context_t g_ph2_button = {
     TRIGGER_BUTTON_PH2_PIN,
     TRIGGER_BUTTON_IDLE,
     0U
 };
 
+/* 初始化按键状态机，确保系统启动后从空闲态开始扫描。 */
 void TriggerButton_Init(void)
 {
     g_ph2_button.state = TRIGGER_BUTTON_IDLE;
@@ -38,6 +40,10 @@ static GPIO_PinState TriggerButton_ReadLevel(const TriggerButton_Context_t *butt
     return HAL_GPIO_ReadPin(TRIGGER_BUTTON_GPIO_PORT, button->pin);
 }
 
+/*
+ * 扫描一次按键状态机。
+ * 只有完成“按下消抖 -> 保持按下 -> 释放消抖”后才返回一次事件，避免长按重复触发。
+ */
 static uint8_t TriggerButton_ScanEvent(TriggerButton_Context_t *button)
 {
     uint8_t event = 0U;

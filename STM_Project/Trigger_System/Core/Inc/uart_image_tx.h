@@ -1,5 +1,5 @@
 /*
- * uart_image_tx.c
+ * uart_image_tx.h
  *
  *  Created on: May 8, 2026
  *      Author: linzh

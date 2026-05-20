@@ -18,24 +18,30 @@
 #define TRIGGER_EVENT_HANDSHAKE_ACK           "READY"
 #define TRIGGER_EVENT_TRANSFER_DONE_REQ       "TX_DONE\r\n"
 #define TRIGGER_EVENT_TRANSFER_DONE_ACK       "DONE_ACK"
+#define TRIGGER_EVENT_STATUS_CAPTURE_FAILED   "CAPTURE_FAILED"
+#define TRIGGER_EVENT_STATUS_IMAGE_ABNORMAL   "IMAGE_ABNORMAL"
+#define TRIGGER_EVENT_STATUS_TRANSFER_FAILED  "TRANSFER_FAILED"
 #define TRIGGER_EVENT_HANDSHAKE_PERIOD_MS     500U
 #define TRIGGER_EVENT_HANDSHAKE_TIMEOUT_MS    10000U
 #define TRIGGER_EVENT_DONE_TIMEOUT_MS         3000U
 #define TRIGGER_EVENT_CAPTURE_TIMEOUT_MS      2000U
 #define TRIGGER_EVENT_CAPTURE_MODE            CAMERA_CAPTURE_MODE_FRAMEEVENT
-// CAMERA_CAPTURE_MODE_DELAY / CAMERA_CAPTURE_MODE_FRAMEEVENT
-#define TRIGGER_EVENT_MIN_VALID_CAPTURE_LEN   32000U
+/* 可切换为固定延时截取或 FrameEvent 截取，当前稳定基线使用 FrameEvent。 */
+#define TRIGGER_EVENT_MIN_VALID_CAPTURE_LEN   40000U
 #define TRIGGER_EVENT_BASELINE_LIGHT_MODE     6U
+#define TRIGGER_EVENT_WARMUP_FRAME_COUNT      3U
 
 /*
  * 模块职责：
- * - 将 PH2 按键事件转换成完整图像流程。
- * - PH2：采集一帧图像到 cam_frame_buffer，随后立即发送 JPEG 并输出对账日志。
+ * - 将 PH2 按键事件转换成一次完整的图像采集、健康检查、传输和对账流程。
+ * - 正常图像进入 UART 图像传输协议；异常图像只输出状态日志，不进入图片传输。
  *
- * 当前实验约束：
+ * 当前稳定基线：
  * - 不修改 UART 帧结构、chunk 协议或 PC 端握手机制。
  * - 图像发送完成后保留 TX_DONE / DONE_ACK 终止握手。
- * - 可在传输结束后执行采集链路重建，用于验证状态残留问题。
+ * - 采集成功后、传输前使用 capture_len 做图像健康检查。
+ * - capture_len 低于阈值时丢弃当前帧，并按 Soft Reset / PWDN Reset 二级恢复。
+ * - 采集失败、图像异常、传输失败均向 PC 输出英文状态标签，便于压力测试观察。
  */
 static DCMI_HandleTypeDef *g_trigger_hdcmi = NULL;
 static UART_HandleTypeDef *g_trigger_huart = NULL;
@@ -51,21 +57,48 @@ typedef enum
 
 static TriggerEvent_RecoveryState g_trigger_recovery_state = TRIGGER_EVENT_RECOVERY_NORMAL;
 
-static void TriggerEvent_ApplyBaselineCameraConfig(void)
+/* 复位或重新配置 OV2640 后丢弃若干预热帧，等待曝光/白平衡/ISP 状态收敛。 */
+static void TriggerEvent_RunWarmupCaptures(void)
+{
+    if (g_trigger_hdcmi == NULL)
+    {
+        return;
+    }
+
+    for (uint8_t i = 0U; i < TRIGGER_EVENT_WARMUP_FRAME_COUNT; i++)
+    {
+#if TRIGGER_EVENT_CAPTURE_MODE == CAMERA_CAPTURE_MODE_FRAMEEVENT
+        (void)CameraCapture_SnapshotByFrameEvent(g_trigger_hdcmi, TRIGGER_EVENT_CAPTURE_TIMEOUT_MS);
+#else
+        (void)CameraCapture_SnapshotByDelay(g_trigger_hdcmi);
+#endif
+    }
+
+    CameraCapture_ClearBuffer();
+}
+
+/* 恢复当前稳定摄像头配置；必要时同步执行预热采集并清空采集缓冲区。 */
+static void TriggerEvent_ApplyBaselineCameraConfig(uint8_t clear_capture_buffer)
 {
     (void)OV2640_Init_1280x960_JPEG();
     (void)OV2640_SetLightMode(TRIGGER_EVENT_BASELINE_LIGHT_MODE);
     HAL_Delay(300);
-    CameraCapture_ClearBuffer();
+
+    if (clear_capture_buffer != 0U)
+    {
+        TriggerEvent_RunWarmupCaptures();
+    }
 }
 
-static void TriggerEvent_SoftRecovery(void)
+/* 一级恢复：通过 SCCB 软件复位重建 OV2640 内部寄存器状态。 */
+static void TriggerEvent_SoftRecovery(uint8_t clear_capture_buffer)
 {
     (void)OV2640_SoftwareReset();
-    TriggerEvent_ApplyBaselineCameraConfig();
+    TriggerEvent_ApplyBaselineCameraConfig(clear_capture_buffer);
 }
 
-static void TriggerEvent_HardRecovery(void)
+/* 二级恢复：通过 PWDN 和 RESET 对摄像头执行硬恢复。 */
+static void TriggerEvent_HardRecovery(uint8_t clear_capture_buffer)
 {
     BSP_PCF8574_CameraPowerDown();
     HAL_Delay(50);
@@ -73,11 +106,11 @@ static void TriggerEvent_HardRecovery(void)
     HAL_Delay(300);
 
     OV2640_HardwareReset();
-    TriggerEvent_ApplyBaselineCameraConfig();
+    TriggerEvent_ApplyBaselineCameraConfig(clear_capture_buffer);
 }
 
-/* Recovery state machine based on the last captured JPEG length. */
-static void TriggerEvent_FullAcquisitionChainRebuild(void)
+/* 基于最近一次 JPEG 长度的采集链路恢复状态机。 */
+static void TriggerEvent_FullAcquisitionChainRebuild(uint8_t clear_capture_buffer)
 {
     if (g_trigger_last_capture_len >= TRIGGER_EVENT_MIN_VALID_CAPTURE_LEN)
     {
@@ -87,12 +120,12 @@ static void TriggerEvent_FullAcquisitionChainRebuild(void)
 
     if (g_trigger_recovery_state == TRIGGER_EVENT_RECOVERY_NORMAL)
     {
-        TriggerEvent_SoftRecovery();
+        TriggerEvent_SoftRecovery(clear_capture_buffer);
         g_trigger_recovery_state = TRIGGER_EVENT_RECOVERY_SOFT_PENDING;
         return;
     }
 
-    TriggerEvent_HardRecovery();
+    TriggerEvent_HardRecovery(clear_capture_buffer);
     g_trigger_recovery_state = TRIGGER_EVENT_RECOVERY_HARD_PENDING;
 }
 
@@ -100,6 +133,44 @@ static void TriggerEvent_FullAcquisitionChainRebuild(void)
 static uint8_t TriggerEvent_HasValidJpeg(void)
 {
     return (cam_state.jpg_len > 0U) ? 1U : 0U;
+}
+
+/* 向 PC 端输出轻量级状态日志，不进入图片传输握手。 */
+static HAL_StatusTypeDef TriggerEvent_SendStatusLog(const char *status)
+{
+    char log_buf[96];
+    int log_len;
+
+    if (g_trigger_huart == NULL || status == NULL)
+    {
+        return HAL_ERROR;
+    }
+
+    log_len = snprintf(
+        log_buf,
+        sizeof(log_buf),
+        "[%s] img_id=%u capture_len=%lu\r\n",
+        status,
+        (unsigned int)g_trigger_img_id,
+        (unsigned long)g_trigger_last_capture_len
+    );
+
+    if (log_len <= 0)
+    {
+        return HAL_ERROR;
+    }
+
+    if (log_len >= (int)sizeof(log_buf))
+    {
+        log_len = (int)sizeof(log_buf) - 1;
+    }
+
+    return HAL_UART_Transmit(
+        g_trigger_huart,
+        (uint8_t *)log_buf,
+        (uint16_t)log_len,
+        1000U
+    );
 }
 
 /*
@@ -346,7 +417,7 @@ static HAL_StatusTypeDef TriggerEvent_CaptureImage(void)
 
 /*
  * 发送当前缓冲区中的 JPEG。
- * 如果没有有效 JPEG，也会完成一次 PC 握手并发送采集日志和 TX_DONE，避免 PC 端卡在接收状态。
+ * 本函数只处理正常图片传输；异常帧已在进入本函数前被拦截。
  */
 static HAL_StatusTypeDef TriggerEvent_SendCurrentImage(void)
 {
@@ -406,22 +477,33 @@ static HAL_StatusTypeDef TriggerEvent_SendCurrentImage(void)
 
 static void TriggerEvent_CaptureAndSend(void)
 {
+    uint8_t image_abnormal = 0U;
+
     if (TriggerEvent_CaptureImage() != HAL_OK)
     {
-        goto fail_cleanup;
+        (void)TriggerEvent_SendStatusLog(TRIGGER_EVENT_STATUS_CAPTURE_FAILED);
+        TriggerEvent_FullAcquisitionChainRebuild(1U);
+        return;
+    }
+
+    /* 拍摄成功后、传输前先做健康检查，异常帧在 MCU 端直接丢弃。 */
+    image_abnormal = (g_trigger_last_capture_len < TRIGGER_EVENT_MIN_VALID_CAPTURE_LEN) ? 1U : 0U;
+    TriggerEvent_FullAcquisitionChainRebuild(image_abnormal);
+
+    if (image_abnormal != 0U)
+    {
+        (void)TriggerEvent_SendStatusLog(TRIGGER_EVENT_STATUS_IMAGE_ABNORMAL);
+        return;
     }
 
     if (TriggerEvent_SendCurrentImage() != HAL_OK)
     {
-        goto fail_cleanup;
+        (void)TriggerEvent_SendStatusLog(TRIGGER_EVENT_STATUS_TRANSFER_FAILED);
+        CameraCapture_ClearBuffer();
+        return;
     }
 
-    TriggerEvent_FullAcquisitionChainRebuild();
     g_trigger_img_id++;
-    return;
-
-fail_cleanup:
-    TriggerEvent_FullAcquisitionChainRebuild();
 }
 
 /* 初始化触发事件模块，保存外设句柄并复位按键状态。 */
